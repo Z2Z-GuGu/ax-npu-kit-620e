@@ -12,6 +12,6 @@
 #define SKEL_AX_SKEL_VERSION_H
 
 #define AX_SKEL_VERSION_MAXLEN      64
-#define AX_SKEL_VERSION     "AX650_SKEL_V1.0.0"
+#define AX_SKEL_VERSION     "AX620E_SKEL_V1.0.0"
 
 #endif
