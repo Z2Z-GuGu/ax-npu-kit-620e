@@ -4,6 +4,7 @@
 #include <chrono>
 #include <vector>
 #include <string>
+#include <algorithm>
 #include <sys/stat.h>
 
 #include "ocr_image.h"
@@ -13,7 +14,127 @@
 #include <sstream>
 
 // 保存识别结果到文件
-void saveRecognitionResults(const std::vector<std::pair<BoundingBox, OCRRecResult>>& results, 
+struct RecognitionResultWithIndex {
+    size_t boxIndex;      // 大框索引
+    size_t subBoxIndex;   // 小框索引（0 表示大框，>0 表示小框）
+    BoundingBox box;      // 边界框
+    OCRRecResult result;  // 识别结果
+};
+
+/**
+ * @brief 智能拼接两个文本，查找重合部分并去重
+ * 算法：text1 的最后 n 个字符与 text2 的前 n 个字符两两比较
+ *      例如 checkRange=4，则比较：
+ *      a1b1, a1b2, a1b3, a1b4,
+ *      a2b1, a2b2, a2b3, a2b4,
+ *      a3b1, a3b2, a3b3, a3b4,
+ *      a4b1, a4b2, a4b3, a4b4
+ *      共 16 次比较，找到相同的字符后，以此为重叠点进行合并
+ * @param text1 第一个文本（A）
+ * @param text2 第二个文本（B）
+ * @param checkRange 检查范围（前后各多少个字符，默认 4 个）
+ * @return 拼接后的文本
+ */
+std::string mergeTexts(const std::string& text1, const std::string& text2, size_t checkRange = 4)
+{
+    if (text1.empty()) return text2;
+    if (text2.empty()) return text1;
+    
+    printf("  Merging texts:\n");
+    printf("    Text1: \"%s\"\n", text1.c_str());
+    printf("    Text2: \"%s\"\n", text2.c_str());
+    
+    size_t len1 = text1.length();
+    size_t len2 = text2.length();
+    
+    // 实际检查的字符数（不能超过字符串长度）
+    size_t actualCheck1 = std::min(checkRange, len1);
+    size_t actualCheck2 = std::min(checkRange, len2);
+    
+    // 存储最佳匹配位置
+    int bestA = -1;  // text1 中的位置（从后往前数）
+    int bestB = -1;  // text2 中的位置（从前往后数）
+    
+    // 两两比较：text1 的最后 actualCheck1 个字符 vs text2 的前 actualCheck2 个字符
+    printf("  Comparing characters (max %zu comparisons):\n", actualCheck1 * actualCheck2);
+    
+    for (size_t i = 0; i < actualCheck1; i++) {
+        for (size_t j = 0; j < actualCheck2; j++) {
+            // text1 倒数第 (i+1) 个字符
+            char a = text1[len1 - 1 - i];
+            // text2 正数第 j 个字符
+            char b = text2[j];
+            
+            // 大小写不敏感比较
+            if (tolower(a) == tolower(b)) {
+                printf("    Match found: a%d='%c' == b%d='%c'\n", i+1, a, j+1, b);
+                // 记录第一个找到的匹配（最靠后的重叠点）
+                if (bestA < 0) {
+                    bestA = i;
+                    bestB = j;
+                }
+            }
+        }
+    }
+    
+    // 如果找到匹配，进行合并
+    if (bestA >= 0 && bestB >= 0) {
+        // text1 保留到倒数第 (bestA+1) 个字符（包含）
+        // text2 从第 (bestB+1) 个字符开始（跳过匹配的字符）
+        std::string merged = text1.substr(0, len1 - bestA) + text2.substr(bestB + 1);
+        printf("    -> Merged at a%d='%c' == b%d='%c': \"%s\"\n", 
+               bestA+1, text1[len1-1-bestA], bestB+1, text2[bestB], merged.c_str());
+        return merged;
+    }
+    
+    // 没找到匹配，直接拼接
+    std::string merged = text1 + text2;
+    printf("    -> No match found, direct concatenation: \"%s\"\n", merged.c_str());
+    return merged;
+}
+
+/**
+ * @brief 智能合并所有识别结果中的连续文本
+ * @param results 识别结果数组
+ * @return 合并后的文本
+ */
+std::string mergeAllTexts(const std::vector<RecognitionResultWithIndex>& results)
+{
+    if (results.empty()) {
+        return "";
+    }
+    
+    printf("\n========================================\n");
+    printf("Merging %zu recognition results...\n", results.size());
+    printf("========================================\n");
+    
+    // 按 boxIndex 和 subBoxIndex 排序
+    std::vector<RecognitionResultWithIndex> sortedResults = results;
+    std::sort(sortedResults.begin(), sortedResults.end(),
+              [](const RecognitionResultWithIndex& a, const RecognitionResultWithIndex& b) {
+                  if (a.boxIndex != b.boxIndex) {
+                      return a.boxIndex < b.boxIndex;
+                  }
+                  return a.subBoxIndex < b.subBoxIndex;
+              });
+    
+    // 逐步合并
+    std::string mergedText = sortedResults[0].result.text;
+    
+    for (size_t i = 1; i < sortedResults.size(); i++) {
+        const auto& item = sortedResults[i];
+        
+        // 合并当前文本
+        mergedText = mergeTexts(mergedText, item.result.text);
+    }
+    
+    printf("\nFinal merged text: \"%s\"\n", mergedText.c_str());
+    printf("========================================\n\n");
+    
+    return mergedText;
+}
+
+void saveRecognitionResults(const std::vector<RecognitionResultWithIndex>& results, 
                             const std::string& outputPath)
 {
     std::string txtPath = outputPath + ".txt";
@@ -27,12 +148,18 @@ void saveRecognitionResults(const std::vector<std::pair<BoundingBox, OCRRecResul
     fprintf(fp, "======================\n\n");
     
     for (size_t i = 0; i < results.size(); i++) {
-        const auto& result = results[i];
-        const BoundingBox& box = result.first;
-        const OCRRecResult& recResult = result.second;
+        const auto& item = results[i];
+        const BoundingBox& box = item.box;
+        const OCRRecResult& recResult = item.result;
         
-        fprintf(fp, "Box %zu: [%d, %d, %d, %d]\n", 
-                i, box.x1, box.y1, box.x2, box.y2);
+        // 输出框索引：如果是小框，格式为 "XX_Y"
+        fprintf(fp, "Box %zu", item.boxIndex);
+        if (item.subBoxIndex > 0) {
+            fprintf(fp, "_%zu", item.subBoxIndex);
+        }
+        fprintf(fp, ": [%d, %d, %d, %d]\n", 
+                box.x1, box.y1, box.x2, box.y2);
+        
         fprintf(fp, "  Text: %s\n", recResult.text.c_str());
         fprintf(fp, "  Confidence: %.4f\n", recResult.confidence);
         fprintf(fp, "\n");
@@ -305,58 +432,12 @@ int main(int argc, char** argv)
         printf("    Box %zu: [%d, %d, %d, %d], score=%.3f\n",
                i, boxes[i].x1, boxes[i].y1, boxes[i].x2, boxes[i].y2, boxes[i].score);
     }
-    recordTime("Step 7 - Extract Bounding Boxes");
-    printMemoryUsage("Step 7 - After Box Extraction");
+    recordTime("Step 7 - Postprocess");
+    printMemoryUsage("Step 7 - After Postprocess");
     printf("\n");
     
-    // 步骤 7.5: 裁剪并保存每个方框图像
-    printf("Step 7.5: Cropping and saving bounding box images...\n");
-    
-    // 创建 image 文件夹
-    std::string imageFolder = "image";
-    mkdir(imageFolder.c_str(), 0755);
-    printf("  Created image folder: %s\n", imageFolder);
-    
-    int savedBoxes = 0;
-    for (size_t i = 0; i < boxes.size(); i++) {
-        const BoundingBox& box = boxes[i];
-        
-        // 裁剪方框图像（包括完整大框和小框）
-        std::vector<BGRImage> boxImages = cropTextLinesFromBox(
-            bgrImage,
-            box.x1, box.y1, box.x2, box.y2
-        );
-        
-        if (boxImages.empty()) {
-            printf("  Warning: Failed to crop box %zu, skipping...\n", i);
-            continue;
-        }
-        
-        // 保存完整大框图像（如 53.jpg）
-        std::string fullBoxPath = imageFolder + "/" + std::to_string(i) + ".jpg";
-        if (saveImage(boxImages[0], fullBoxPath)) {
-            printf("  Saved full box %zu: %s (%dx%d)\n", 
-                   i, fullBoxPath.c_str(), 
-                   boxImages[0].width, boxImages[0].height);
-            savedBoxes++;
-        }
-        
-        // 保存小框图像（如 53_1.jpg, 53_2.jpg）
-        for (size_t j = 1; j < boxImages.size(); j++) {
-            std::string subBoxPath = imageFolder + "/" + std::to_string(i) + "_" + std::to_string(j) + ".jpg";
-            if (saveImage(boxImages[j], subBoxPath)) {
-                printf("    Saved sub-box %zu_%zu: %s (%dx%d)\n", 
-                       i, j, subBoxPath.c_str(),
-                       boxImages[j].width, boxImages[j].height);
-            }
-        }
-    }
-    
-    printf("  Total: saved %zu boxes with sub-boxes\n", savedBoxes);
-    printf("\n");
-    
-    // 步骤 7.6: 加载 OCR 识别模型和字典
-    printf("Step 7.6: Loading OCR recognition model and dictionary...\n");
+    // 步骤 8: 加载 OCR 识别模型和字典
+    printf("Step 8: Loading OCR recognition model and dictionary...\n");
     OcrRecNPU recognizer;
     
     if (!recognizer.loadModel(recModelPath)) {
@@ -370,92 +451,189 @@ int main(int argc, char** argv)
     }
     
     printf("Recognition model and dictionary loaded successfully!\n");
-    recordTime("Step 7.6 - Load Recognition Model");
-    printMemoryUsage("Step 7.6 - After Load Recognition");
+    recordTime("Step 8 - Load Recognition Model");
+    printMemoryUsage("Step 8 - After Load Recognition");
     printf("\n");
     
-    // 步骤 7.7: 对每个方框进行文字识别
-    printf("Step 7.7: Recognizing text in bounding boxes...\n");
-    std::vector<std::pair<BoundingBox, OCRRecResult>> recognitionResults;
+    // 步骤 9: 对每个方框进行裁剪、保存、识别
+    printf("Step 9: Cropping, saving and recognizing text in bounding boxes...\n");
+    std::vector<RecognitionResultWithIndex> recognitionResults;
+    
+    // 打开文件准备保存识别结果
+    std::string txtPath = outputPath + ".txt";
+    FILE* fp = fopen(txtPath.c_str(), "w");
+    if (!fp) {
+        printf("Error: Cannot create output file: %s\n", txtPath.c_str());
+        return -1;
+    }
+    
+    fprintf(fp, "OCR Recognition Results\n");
+    fprintf(fp, "======================\n\n");
+    
+    // 创建 image 文件夹
+    std::string imageFolder = "image";
+    mkdir(imageFolder.c_str(), 0755);
+    printf("  Created image folder: %s\n", imageFolder);
     
     for (size_t i = 0; i < boxes.size(); i++) {
         const BoundingBox& box = boxes[i];
         
-        // 裁剪方框图像（使用完整大框）
+        // 1. 裁剪方框图像（包括完整大框和小框）
         std::vector<BGRImage> boxImages = cropTextLinesFromBox(
             bgrImage,
             box.x1, box.y1, box.x2, box.y2
         );
         
         if (boxImages.empty()) {
-            printf("  Warning: Failed to crop box %zu for recognition, skipping...\n", i);
+            printf("  Warning: Failed to crop box %zu, skipping...\n", i);
             continue;
         }
         
-        // 对每个小框进行识别（如果有多个小框）
+        // 2. 保存图像到文件
         for (size_t j = 0; j < boxImages.size(); j++) {
-            const BGRImage& boxImage = boxImages[j];
-            
-            printf("  Recognizing box %zu", i);
+            std::string fileName = std::to_string(i);
             if (j > 0) {
-                printf("_%zu", j);
+                fileName += "_" + std::to_string(j);
             }
-            printf(" (%dx%d)...\n", boxImage.width, boxImage.height);
+            std::string imagePath = imageFolder + "/" + fileName + ".jpg";
             
-            // 运行识别
+            if (! saveImage(boxImages[j], imagePath)) {
+                printf("  Warning: Failed to save image %s, skipping...\n", imagePath.c_str());
+                continue;
+            }
+        }
+        
+        // 3. 对裁剪的图像进行识别
+        if (boxImages.size() == 1) {
+            // 只有大框，直接识别
+            const BGRImage& boxImage = boxImages[0];
+            printf("  Recognizing box %zu (full box, %dx%d)...\n", i, boxImage.width, boxImage.height);
+            
             OCRRecResult recResult = recognizer.recognize(boxImage);
             
             if (recResult.success && !recResult.text.empty()) {
                 printf("    -> Text: \"%s\" (confidence: %.4f)\n", 
                        recResult.text.c_str(), recResult.confidence);
                 
-                // 保存结果
-                recognitionResults.push_back(std::make_pair(box, recResult));
-            } else {
-                printf("    -> Failed to recognize (success=%d, text empty=%d)\n", 
-                       recResult.success, recResult.text.empty());
-                if (!recResult.errorMessage.empty()) {
-                    printf("    -> Error: %s\n", recResult.errorMessage.c_str());
+                RecognitionResultWithIndex result;
+                result.boxIndex = i;
+                result.subBoxIndex = 0;
+                result.box = box;
+                result.result = recResult;
+                recognitionResults.push_back(result);
+                
+                // 保存到文件
+                fprintf(fp, "Box %zu: [%d, %d, %d, %d]\n", 
+                        i, box.x1, box.y1, box.x2, box.y2);
+                fprintf(fp, "  Text: %s\n", recResult.text.c_str());
+                fprintf(fp, "  Confidence: %.4f\n", recResult.confidence);
+                fprintf(fp, "\n");
+            }
+        } else {
+            // 存在小框，识别所有小框并合并
+            printf("  Recognizing %zu sub-boxes for box %zu...\n", boxImages.size() - 1, i);
+            
+            std::vector<RecognitionResultWithIndex> subBoxResults;
+            for (size_t j = 1; j < boxImages.size(); j++) {
+                const BGRImage& boxImage = boxImages[j];
+                printf("    Recognizing sub-box %zu_%zu (%dx%d)...\n", i, j, boxImage.width, boxImage.height);
+                
+                OCRRecResult recResult = recognizer.recognize(boxImage);
+                
+                if (recResult.success && !recResult.text.empty()) {
+                    printf("      -> Text: \"%s\" (confidence: %.4f)\n", 
+                           recResult.text.c_str(), recResult.confidence);
+                    
+                    RecognitionResultWithIndex result;
+                    result.boxIndex = i;
+                    result.subBoxIndex = j;
+                    result.box = box;
+                    result.result = recResult;
+                    subBoxResults.push_back(result);
+                    
+                    // 保存到文件
+                    fprintf(fp, "Box %zu_%zu: [%d, %d, %d, %d]\n", 
+                            i, j, box.x1, box.y1, box.x2, box.y2);
+                    fprintf(fp, "  Text: %s\n", recResult.text.c_str());
+                    fprintf(fp, "  Confidence: %.4f\n", recResult.confidence);
+                    fprintf(fp, "\n");
                 }
+            }
+            
+            // 合并小框结果
+            if (!subBoxResults.empty()) {
+                printf("\n  Merging %zu sub-box results for box %zu...\n", subBoxResults.size(), i);
+                std::string mergedText = mergeAllTexts(subBoxResults);
+                
+                RecognitionResultWithIndex mergedResult;
+                mergedResult.boxIndex = i;
+                mergedResult.subBoxIndex = 0;
+                mergedResult.box = box;
+                mergedResult.result.text = mergedText;
+                mergedResult.result.success = true;
+                mergedResult.result.confidence = subBoxResults[0].result.confidence;
+                
+                recognitionResults.push_back(mergedResult);
+                printf("  Box %zu final merged text: \"%s\"\n\n", i, mergedText.c_str());
+                
+                // 保存合并后的结果
+                fprintf(fp, "Box %zu (merged): [%d, %d, %d, %d]\n", 
+                        i, box.x1, box.y1, box.x2, box.y2);
+                fprintf(fp, "  Text: %s\n", mergedText.c_str());
+                fprintf(fp, "  Confidence: %.4f\n", mergedResult.result.confidence);
+                fprintf(fp, "\n");
             }
         }
     }
     
-    printf("\nTotal recognition results: %zu\n", recognitionResults.size());
-    recordTime("Step 7.7 - Recognition");
-    printMemoryUsage("Step 7.7 - After Recognition");
+    fclose(fp);
+    printf("\nRecognition results saved to: %s\n", txtPath.c_str());
+    printf("Total recognition results: %zu\n", recognitionResults.size());
+    recordTime("Step 9 - Crop, Save & Recognize");
+    printMemoryUsage("Step 9 - After Recognition");
     printf("\n");
     
-    // 步骤 7.8: 保存识别结果到文件
-    printf("Step 7.8: Saving recognition results...\n");
-    saveRecognitionResults(recognitionResults, outputPath);
-    recordTime("Step 7.8 - Save Recognition Results");
-    printf("\n");
+    // // 步骤 10: 智能合并所有识别结果
+    // printf("Step 10: Merging all recognition results...\n");
+    // std::string mergedText = mergeAllTexts(recognitionResults);
     
-    // 步骤 8: 将热力图可视化（带方框）
-    printf("Step 8: Visualizing merged heatmap with bounding boxes...\n");
+    // // 保存合并后的文本到单独的文件
+    // std::string mergedTxtPath = outputPath + "_merged.txt";
+    // FILE* fpMerged = fopen(mergedTxtPath.c_str(), "w");
+    // if (fpMerged) {
+    //     fprintf(fpMerged, "Merged OCR Text\n");
+    //     fprintf(fpMerged, "===============\n\n");
+    //     fprintf(fpMerged, "%s\n", mergedText.c_str());
+    //     fclose(fpMerged);
+    //     printf("Merged text saved to: %s\n", mergedTxtPath.c_str());
+    // }
+    // recordTime("Step 10 - Merge Texts");
+    // printf("\n");
+    
+    // 步骤 11: 将热力图可视化（带方框）
+    printf("Step 11: Visualizing merged heatmap with bounding boxes...\n");
     BGRImage visImage = visualizeMergedHeatmap(bgrImage, mergedHeatmap, 0.5f, boxes);
-    recordTime("Step 8 - Visualize");
-    printMemoryUsage("Step 8 - After Visualization");
+    recordTime("Step 11 - Visualize");
+    printMemoryUsage("Step 11 - After Visualization");
     printf("\n");
     
-    // 步骤 9: 保存可视化结果
-    printf("Step 9: Saving visualization result...\n");
+    // 步骤 12: 保存可视化结果
+    printf("Step 12: Saving visualization result...\n");
     if (saveImage(visImage, outputPath)) {
         printf("  Saved: %s\n", outputPath.c_str());
     } else {
         printf("  Warning: Failed to save %s\n", outputPath.c_str());
     }
-    recordTime("Step 9 - Save Image");
-    printMemoryUsage("Step 9 - After Save");
+    recordTime("Step 12 - Save Image");
+    printMemoryUsage("Step 12 - After Save");
     printf("\n");
     
-    // 步骤 10: 对象离开作用域，自动释放 NPU 资源和热力图数据
-    printf("Step 10: Destroying objects...\n");
+    // 步骤 13: 对象离开作用域，自动释放 NPU 资源和热力图数据
+    printf("Step 13: Destroying objects...\n");
     // detector, image, heatmaps, mergedHeatmap, boxes 等对象会自动调用析构函数
     printf("All objects destroyed, resources released automatically\n");
-    recordTime("Step 10 - Cleanup");
-    printMemoryUsage("Final - After Cleanup");
+    recordTime("Step 13 - Cleanup");
+    printMemoryUsage("Step 13 - After Cleanup");
     printf("\n");
 
     printf("========================================\n");
