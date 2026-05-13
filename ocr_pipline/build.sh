@@ -19,6 +19,10 @@ case "$CHIP_TYPE" in
         CHIP_FLAG="-DCHIP_AX620Q=ON"
         TOOLCHAIN="../toolchains/arm-linux-uclibc-gnueabihf.toolchain.cmake"
         ;;
+    AX620QE)
+        CHIP_FLAG="-DCHIP_AX620QE=ON"
+        TOOLCHAIN="../toolchains/arm-none-linux-gnueabihf.toolchain.cmake"
+        ;;
     AX630C)
         CHIP_FLAG="-DCHIP_AX630C=ON"
         TOOLCHAIN="../toolchains/aarch64-none-linux-gnu.toolchain.cmake"
@@ -29,7 +33,7 @@ case "$CHIP_TYPE" in
         ;;
     *)
         echo "Error: Unknown chip type: $CHIP_TYPE"
-        echo "Supported types: AX620Q, AX630C, AX650"
+        echo "Supported types: AX620Q, AX620QE, AX630C, AX650"
         exit 1
         ;;
 esac
