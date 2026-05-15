@@ -80,46 +80,10 @@ include_directories(${OpenCV_INCLUDE_DIRS})
 # Add components directory
 add_subdirectory(components)
 
-# Main executable
-add_executable(ocr_pipline test_pipline/ocr_pipline.cpp)
-target_link_libraries(ocr_pipline
-    ocr_image
-    ocr_det
-    ocr_rec
-    ${MSP_LIBS}
-    pthread
-    ${OpenCV_LIBS}
-)
-
-# Test executable for standalone OCR recognition
-add_executable(test_rec test_rec/test_rec.cpp)
-target_link_libraries(test_rec
-    ocr_image
-    ocr_rec
-    ${MSP_LIBS}
-    pthread
-    ${OpenCV_LIBS}
-)
+# Add applications as subdirectories (each has its own build folder)
+add_subdirectory(test_pipline)
+add_subdirectory(test_rec)
+add_subdirectory(ocr_process)
 
 # Image getting application
 add_subdirectory(image_getting)
-
-set_target_properties(ocr_pipline PROPERTIES
-    BUILD_RPATH "${MSP_LIB_DIR}"
-    INSTALL_RPATH "${MSP_LIB_DIR}"
-)
-
-set_target_properties(test_rec PROPERTIES
-    BUILD_RPATH "${MSP_LIB_DIR}"
-    INSTALL_RPATH "${MSP_LIB_DIR}"
-)
-
-set_target_properties(image_getting PROPERTIES
-    BUILD_RPATH "${MSP_LIB_DIR}"
-    INSTALL_RPATH "${MSP_LIB_DIR}"
-)
-
-# Install target
-install(TARGETS ocr_pipline DESTINATION bin)
-install(TARGETS test_rec DESTINATION bin)
-install(TARGETS image_getting DESTINATION bin)

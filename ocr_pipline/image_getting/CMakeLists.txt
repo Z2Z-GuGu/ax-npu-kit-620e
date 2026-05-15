@@ -50,6 +50,16 @@ add_executable(image_getting main.cpp)
 
 # 链接库
 target_link_libraries(image_getting 
+    ${MSP_LIBS}
     ${OpenCV_LIBS}
     pthread
 )
+
+# 设置运行时路径
+set_target_properties(image_getting PROPERTIES
+    BUILD_RPATH "${MSP_LIB_DIR}"
+    INSTALL_RPATH "${MSP_LIB_DIR}"
+)
+
+# 安装目标
+install(TARGETS image_getting DESTINATION bin)

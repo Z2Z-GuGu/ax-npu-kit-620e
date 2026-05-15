@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(ocr_pipline_app)
+project(ocr_process_app)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -54,10 +54,10 @@ find_package(OpenCV REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 
 # 添加可执行文件
-add_executable(ocr_pipline_app ocr_pipline.cpp)
+add_executable(ocr_process_app ocr_process.cpp)
 
 # 链接库
-target_link_libraries(ocr_pipline_app 
+target_link_libraries(ocr_process_app 
     ocr_image
     ocr_det
     ocr_rec
@@ -67,10 +67,10 @@ target_link_libraries(ocr_pipline_app
 )
 
 # 设置运行时路径
-set_target_properties(ocr_pipline_app PROPERTIES
+set_target_properties(ocr_process_app PROPERTIES
     BUILD_RPATH "${MSP_LIB_DIR}"
     INSTALL_RPATH "${MSP_LIB_DIR}"
 )
 
 # 安装目标
-install(TARGETS ocr_pipline_app DESTINATION bin)
+install(TARGETS ocr_process_app DESTINATION bin)

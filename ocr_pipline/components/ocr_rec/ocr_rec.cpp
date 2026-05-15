@@ -485,3 +485,97 @@ OCRRecResult OcrRecNPU::recognize(const BGRImage& inputImage)
     
     return result;
 }
+
+std::string OcrRecNPU::mergeTexts(const std::string& text1, const std::string& text2, size_t checkRange)
+{
+    if (text1.empty()) return text2;
+    if (text2.empty()) return text1;
+    
+    printf("  Merging texts:\n");
+    printf("    Text1: \"%s\"\n", text1.c_str());
+    printf("    Text2: \"%s\"\n", text2.c_str());
+    
+    size_t len1 = text1.length();
+    size_t len2 = text2.length();
+    
+    // 实际检查的字符数（不能超过字符串长度）
+    size_t actualCheck1 = std::min(checkRange, len1);
+    size_t actualCheck2 = std::min(checkRange, len2);
+    
+    // 存储最佳匹配位置
+    int bestA = -1;  // text1 中的位置（从后往前数）
+    int bestB = -1;  // text2 中的位置（从前往后数）
+    
+    // 两两比较：text1 的最后 actualCheck1 个字符 vs text2 的前 actualCheck2 个字符
+    printf("  Comparing characters (max %zu comparisons):\n", actualCheck1 * actualCheck2);
+    
+    for (size_t i = 0; i < actualCheck1; i++) {
+        for (size_t j = 0; j < actualCheck2; j++) {
+            // text1 倒数第 (i+1) 个字符
+            char a = text1[len1 - 1 - i];
+            // text2 正数第 j 个字符
+            char b = text2[j];
+            
+            // 大小写不敏感比较
+            if (tolower(a) == tolower(b)) {
+                printf("    Match found: a%d='%c' == b%d='%c'\n", i+1, a, j+1, b);
+                // 记录第一个找到的匹配（最靠后的重叠点）
+                if (bestA < 0) {
+                    bestA = i;
+                    bestB = j;
+                }
+            }
+        }
+    }
+    
+    // 如果找到匹配，进行合并
+    if (bestA >= 0 && bestB >= 0) {
+        // text1 保留到倒数第 (bestA+1) 个字符（包含）
+        // text2 从第 (bestB+1) 个字符开始（跳过匹配的字符）
+        std::string merged = text1.substr(0, len1 - bestA) + text2.substr(bestB + 1);
+        printf("    -> Merged at a%d='%c' == b%d='%c': \"%s\"\n", 
+               bestA+1, text1[len1-1-bestA], bestB+1, text2[bestB], merged.c_str());
+        return merged;
+    }
+    
+    // 没找到匹配，直接拼接
+    std::string merged = text1 + text2;
+    printf("    -> No match found, direct concatenation: \"%s\"\n", merged.c_str());
+    return merged;
+}
+
+std::string OcrRecNPU::mergeAllTexts(const std::vector<RecognitionResultWithIndex>& results)
+{
+    if (results.empty()) {
+        return "";
+    }
+    
+    printf("\n========================================\n");
+    printf("Merging %zu recognition results...\n", results.size());
+    printf("========================================\n");
+    
+    // 按 boxIndex 和 subBoxIndex 排序
+    std::vector<RecognitionResultWithIndex> sortedResults = results;
+    std::sort(sortedResults.begin(), sortedResults.end(),
+              [](const RecognitionResultWithIndex& a, const RecognitionResultWithIndex& b) {
+                  if (a.boxIndex != b.boxIndex) {
+                      return a.boxIndex < b.boxIndex;
+                  }
+                  return a.subBoxIndex < b.subBoxIndex;
+              });
+    
+    // 逐步合并
+    std::string mergedText = sortedResults[0].result.text;
+    
+    for (size_t i = 1; i < sortedResults.size(); i++) {
+        const auto& item = sortedResults[i];
+        
+        // 合并当前文本
+        mergedText = mergeTexts(mergedText, item.result.text);
+    }
+    
+    printf("\nFinal merged text: \"%s\"\n", mergedText.c_str());
+    printf("========================================\n\n");
+    
+    return mergedText;
+}

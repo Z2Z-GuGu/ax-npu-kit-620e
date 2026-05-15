@@ -5,6 +5,7 @@
 #include <vector>
 #include <memory>
 #include "ocr_image.h"
+#include "ocr_det.h"  // 用于 BoundingBox 定义
 
 // AXERA SDK headers
 #include "ax_engine_api.h"
@@ -37,6 +38,18 @@ struct OCRRecResult {
     bool isValid() const {
         return success && !text.empty() && confidence > 0.0f;
     }
+};
+
+/**
+ * @brief 带索引的识别结果结构体
+ * 
+ * 用于跟踪每个识别结果对应的大框和小框索引
+ */
+struct RecognitionResultWithIndex {
+    size_t boxIndex;      // 大框索引
+    size_t subBoxIndex;   // 小框索引（0 表示大框，>0 表示小框）
+    BoundingBox box;      // 边界框
+    OCRRecResult result;  // 识别结果
 };
 
 /**
@@ -105,6 +118,29 @@ public:
      * @return true 文件存在，false 文件不存在
      */
     static bool fileExists(const std::string& filename);
+    
+    /**
+     * @brief 智能拼接两个文本，查找重合部分并去重
+     * 算法：text1 的最后 n 个字符与 text2 的前 n 个字符两两比较
+     *      例如 checkRange=4，则比较：
+     *      a1b1, a1b2, a1b3, a1b4,
+     *      a2b1, a2b2, a2b3, a2b4,
+     *      a3b1, a3b2, a3b3, a3b4,
+     *      a4b1, a4b2, a4b3, a4b4
+     *      共 16 次比较，找到相同的字符后，以此为重叠点进行合并
+     * @param text1 第一个文本（A）
+     * @param text2 第二个文本（B）
+     * @param checkRange 检查范围（前后各多少个字符，默认 4 个）
+     * @return 拼接后的文本
+     */
+    static std::string mergeTexts(const std::string& text1, const std::string& text2, size_t checkRange = 4);
+    
+    /**
+     * @brief 智能合并所有识别结果中的连续文本
+     * @param results 识别结果数组（包含 boxIndex 和 subBoxIndex）
+     * @return 合并后的文本
+     */
+    static std::string mergeAllTexts(const std::vector<RecognitionResultWithIndex>& results);
 
 private:
     AX_ENGINE_HANDLE handle;           // NPU 引擎句柄

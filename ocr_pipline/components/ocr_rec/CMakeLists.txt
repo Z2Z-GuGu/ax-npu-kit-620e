@@ -5,6 +5,7 @@ add_library(ocr_rec STATIC
 target_include_directories(ocr_rec PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/components/ocr_image
+    ${CMAKE_SOURCE_DIR}/components/ocr_det
 )
 
 # 链接必要的库（根据实际模型推理库调整）

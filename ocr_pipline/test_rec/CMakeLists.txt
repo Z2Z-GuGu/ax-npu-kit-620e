@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(test_rec)
+project(test_rec_app)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,6 +21,11 @@ elseif (CHIP_AX620Q)
     add_definitions(-DCHIP_AX620Q)
     if(NOT BSP_MSP_DIR)
         set(BSP_MSP_DIR ${PROJECT_ROOT_DIR}/ax620q_bsp_sdk/msp/out/arm_uclibc)
+    endif()
+elseif (CHIP_AX620QE)
+    add_definitions(-DCHIP_AX620QE)
+    if(NOT BSP_MSP_DIR)
+        set(BSP_MSP_DIR ${PROJECT_ROOT_DIR}/ax620q_bsp_sdk/msp/out/arm_glibc)
     endif()
 endif()
 
@@ -48,18 +53,23 @@ link_directories(${MSP_LIB_DIR})
 find_package(OpenCV REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 
-# 包含头文件路径
-include_directories(${CMAKE_SOURCE_DIR}/../components/ocr_rec)
-include_directories(${CMAKE_SOURCE_DIR}/../components/ocr_image)
-include_directories(${PROJECT_ROOT_DIR}/inc)
-
 # 添加可执行文件
-add_executable(test_rec test_rec.cpp)
+add_executable(test_rec_app test_rec.cpp)
 
 # 链接库
-target_link_libraries(test_rec 
-    ocr_rec
+target_link_libraries(test_rec_app 
     ocr_image
+    ocr_rec
     ${MSP_LIBS}
+    pthread
     ${OpenCV_LIBS}
 )
+
+# 设置运行时路径
+set_target_properties(test_rec_app PROPERTIES
+    BUILD_RPATH "${MSP_LIB_DIR}"
+    INSTALL_RPATH "${MSP_LIB_DIR}"
+)
+
+# 安装目标
+install(TARGETS test_rec_app DESTINATION bin)
