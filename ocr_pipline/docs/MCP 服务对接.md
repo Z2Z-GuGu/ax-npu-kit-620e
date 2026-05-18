@@ -407,3 +407,8 @@ max_batch_size = 64
 Authorization: Bearer your-token
 ```
 
+root@nanoagent-79d6:~/ocr# curl -sS -H 'Content-Type: application/json' -X POST --data-binary @/root/ocr/test2_output_result.json http://127.0.0.1:8743/v1/observations
+{"ok":true,"stored":[{"path":"/var/lib/openchronicle/observation-buffer/2026-05-18T07-58-08Z.json","file_stem":"2026-05-18T07-58-08Z","indexed":true}]}
+root@nanoagent-79d6:~/ocr# 
+
+  Executing: curl -sS -H 'Content-Type: application/json' -X POST --data-binary @/tmp/result.json http://127.0.0.1:8743/v1/observations

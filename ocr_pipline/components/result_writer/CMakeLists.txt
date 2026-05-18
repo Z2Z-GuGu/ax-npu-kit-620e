@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.10)
-project(ocr_process_app)
+project(result_writer)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(PROJECT_ROOT_DIR ${CMAKE_SOURCE_DIR}/..)
+set(PROJECT_ROOT_DIR ${CMAKE_SOURCE_DIR}/../..)
 
 # 配置芯片类型和 BSP 路径
 if (CHIP_AX650)
@@ -38,40 +38,18 @@ message(STATUS "BSP_MSP_DIR = ${BSP_MSP_DIR}")
 set(MSP_INC_DIR ${BSP_MSP_DIR}/include)
 set(MSP_LIB_DIR ${BSP_MSP_DIR}/lib)
 
-list(APPEND MSP_LIBS
-        ax_sys
-        ax_proton
-        ax_ivps
-        ax_venc
-        ax_engine
-        ax_interpreter)
+# 添加库
+add_library(result_writer STATIC result_writer.cpp)
 
-include_directories(${MSP_INC_DIR})
-link_directories(${MSP_LIB_DIR})
+# 包含目录
+target_include_directories(result_writer PUBLIC 
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJECT_ROOT_DIR}/components/ocr_det
+    ${PROJECT_ROOT_DIR}/components/ocr_rec
+)
 
-# 查找 OpenCV
-find_package(OpenCV REQUIRED)
-include_directories(${OpenCV_INCLUDE_DIRS})
-
-# 添加可执行文件
-add_executable(ocr_process_app ocr_process.cpp)
-
-# 链接库
-target_link_libraries(ocr_process_app 
-    ocr_image
+# 链接依赖库
+target_link_libraries(result_writer
     ocr_det
     ocr_rec
-    result_writer
-    ${MSP_LIBS}
-    pthread
-    ${OpenCV_LIBS}
 )
-
-# 设置运行时路径
-set_target_properties(ocr_process_app PROPERTIES
-    BUILD_RPATH "${MSP_LIB_DIR}"
-    INSTALL_RPATH "${MSP_LIB_DIR}"
-)
-
-# 安装目标
-install(TARGETS ocr_process_app DESTINATION bin)

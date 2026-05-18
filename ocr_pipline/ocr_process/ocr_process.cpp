@@ -6,49 +6,17 @@
 #include <string>
 #include <algorithm>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <csignal>
+#include <atomic>
 
 #include "ocr_image.h"
 #include "ocr_det.h"
 #include "ocr_rec.h"
+#include "result_writer.h"
 #include <fstream>
 #include <sstream>
-
-// 使用 ocr_rec.h 中定义的 RecognitionResultWithIndex 结构体
-
-void saveRecognitionResults(const std::vector<RecognitionResultWithIndex>& results, 
-                            const std::string& outputPath)
-{
-    std::string txtPath = outputPath + ".txt";
-    FILE* fp = fopen(txtPath.c_str(), "w");
-    if (!fp) {
-        printf("Error: Cannot create output file: %s\n", txtPath.c_str());
-        return;
-    }
-    
-    fprintf(fp, "OCR Recognition Results\n");
-    fprintf(fp, "======================\n\n");
-    
-    for (size_t i = 0; i < results.size(); i++) {
-        const auto& item = results[i];
-        const BoundingBox& box = item.box;
-        const OCRRecResult& recResult = item.result;
-        
-        // 输出框索引：如果是小框，格式为 "XX_Y"
-        fprintf(fp, "Box %zu", item.boxIndex);
-        if (item.subBoxIndex > 0) {
-            fprintf(fp, "_%zu", item.subBoxIndex);
-        }
-        fprintf(fp, ": [%d, %d, %d, %d]\n", 
-                box.x1, box.y1, box.x2, box.y2);
-        
-        fprintf(fp, "  Text: %s\n", recResult.text.c_str());
-        fprintf(fp, "  Confidence: %.4f\n", recResult.confidence);
-        fprintf(fp, "\n");
-    }
-    
-    fclose(fp);
-    printf("Recognition results saved to: %s\n", txtPath.c_str());
-}
 
 // 获取当前进程内存使用信息（单位：KB）
 struct MemoryInfo {
@@ -127,20 +95,223 @@ void printTiming() {
     printf("==================================================\n");
 }
 
+// 全局变量用于控制监控循环
+static std::atomic<bool> g_running(true);
 
-int main(int argc, char** argv)
-{
-    if (argc != 6) {
-        printf("Usage: %s <det_model> <rec_model> <dict_path> <input_image> <output_image>\n", argv[0]);
-        printf("./ocr_pipline /root/models/pp_ocr/ch_PP_OCRv3_det_npu.axmodel /root/models/pp_ocr/ch_PP_OCRv4_rec_npu.axmodel /root/models/pp_ocr/ppocr_keys_v1.txt ./test.png ./out.jpg\n");
-        return -1;
+void signalHandler(int signum) {
+    printf("\nReceived signal %d, shutting down...\n", signum);
+    g_running = false;
+}
+
+// 结构体用于存储文件夹信息
+struct FolderInfo {
+    std::string path;
+    std::time_t modifyTime;
+};
+
+// 比较文件夹修改时间（降序）
+bool compareFolders(const FolderInfo& a, const FolderInfo& b) {
+    return a.modifyTime > b.modifyTime;
+}
+
+// 结构体用于存储图片信息
+struct ImageInfo {
+    std::string path;
+    std::string name;
+    std::time_t modifyTime;
+};
+
+// 比较图片修改时间（降序）
+bool compareImages(const ImageInfo& a, const ImageInfo& b) {
+    return a.modifyTime > b.modifyTime;
+}
+
+// 检查文件是否已处理（是否有 _ocr 后缀）
+bool isFileProcessed(const std::string& filePath) {
+    size_t dotPos = filePath.find_last_of('.');
+    if (dotPos == std::string::npos) return false;
+    
+    std::string baseName = filePath.substr(0, dotPos);
+    return baseName.size() > 4 && baseName.substr(baseName.size() - 4) == "_ocr";
+}
+
+// 获取文件夹下所有子文件夹（按修改时间排序）
+std::vector<FolderInfo> getSubFolders(const std::string& parentPath) {
+    std::vector<FolderInfo> folders;
+    DIR* dir = opendir(parentPath.c_str());
+    if (!dir) return folders;
+    
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name == "." || name == "..") continue;
+        
+        std::string fullPath = parentPath + "/" + name;
+        struct stat st;
+        if (stat(fullPath.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            FolderInfo info;
+            info.path = fullPath;
+            info.modifyTime = st.st_mtime;
+            folders.push_back(info);
+        }
+    }
+    closedir(dir);
+    
+    // 按修改时间降序排序
+    std::sort(folders.begin(), folders.end(), compareFolders);
+    return folders;
+}
+
+// 获取文件夹下所有图片文件（按修改时间排序）
+std::vector<ImageInfo> getImagesInFolder(const std::string& folderPath) {
+    std::vector<ImageInfo> images;
+    DIR* dir = opendir(folderPath.c_str());
+    if (!dir) return images;
+    
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name == "." || name == "..") continue;
+        
+        // 检查是否为图片文件（.jpg 或 .png）
+        size_t dotPos = name.find_last_of('.');
+        if (dotPos == std::string::npos) continue;
+        std::string ext = name.substr(dotPos);
+        if (ext != ".jpg" && ext != ".png" && ext != ".JPG" && ext != ".PNG") continue;
+        
+        std::string fullPath = folderPath + "/" + name;
+        struct stat st;
+        if (stat(fullPath.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+            ImageInfo info;
+            info.path = fullPath;
+            info.name = name;
+            info.modifyTime = st.st_mtime;
+            images.push_back(info);
+        }
+    }
+    closedir(dir);
+    
+    // 按修改时间降序排序
+    std::sort(images.begin(), images.end(), compareImages);
+    return images;
+}
+
+// 获取最新的未处理图片
+std::string getLatestUnprocessedImage(const std::string& rootFolder) {
+    // 获取所有子文件夹
+    std::vector<FolderInfo> folders = getSubFolders(rootFolder);
+    
+    // 遍历每个文件夹（从最新到最旧）
+    for (const auto& folder : folders) {
+        std::vector<ImageInfo> images = getImagesInFolder(folder.path);
+        
+        // 找到第一个未处理的图片
+        for (const auto& img : images) {
+            if (!isFileProcessed(img.name)) {
+                return img.path;
+            }
+        }
     }
     
-    std::string detModelPath = argv[1];
-    std::string recModelPath = argv[2];
-    std::string dictPath = argv[3];
-    std::string inputPath = argv[4];
-    std::string outputPath = argv[5];
+    return "";  // 没有找到未处理的图片
+}
+
+// 重命名图片，添加 _ocr 后缀
+bool markImageAsProcessed(const std::string& imagePath) {
+    size_t dotPos = imagePath.find_last_of('.');
+    if (dotPos == std::string::npos) return false;
+    
+    std::string baseName = imagePath.substr(0, dotPos);
+    std::string ext = imagePath.substr(dotPos);
+    std::string newPath = baseName + "_ocr" + ext;
+    
+    if (rename(imagePath.c_str(), newPath.c_str()) != 0) {
+        printf("  Warning: Failed to rename %s to %s\n", imagePath.c_str(), newPath.c_str());
+        return false;
+    }
+    
+    printf("  Renamed: %s -> %s\n", imagePath.c_str(), newPath.c_str());
+    return true;
+}
+
+// 上传 JSON 到 MCP 服务（使用 system 调用 curl）
+bool uploadJsonToMcp(const std::string& jsonContent, const std::string& mcpUrl) {
+    printf("  Uploading JSON to MCP service: %s\n", mcpUrl.c_str());
+    
+    // 将 JSON 内容写入固定临时文件
+    std::string tempFile = "/tmp/result.json";
+    std::ofstream tempStream(tempFile);
+    if (!tempStream.is_open()) {
+        printf("  Error: Cannot create temp file %s\n", tempFile.c_str());
+        return false;
+    }
+    tempStream << jsonContent;
+    tempStream.close();
+    printf("  Saved JSON to temp file: %s\n", tempFile.c_str());
+    
+    // 构建 curl 命令（参考文档中的格式）
+    std::string curlCmd = "curl -sS "
+                         "-H 'Content-Type: application/json' "
+                         "-X POST "
+                         "--data-binary @" + tempFile + " " +
+                         mcpUrl;
+    
+    printf("  Executing: %s\n", curlCmd.c_str());
+    
+    // 执行命令并获取结果
+    FILE* pipe = popen(curlCmd.c_str(), "r");
+    if (!pipe) {
+        printf("  Error: Failed to execute curl command\n");
+        return false;
+    }
+    
+    char buffer[256];
+    std::string response;
+    long httpCode = 0;
+    
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        response += buffer;
+    }
+    
+    int exitCode = pclose(pipe);
+    
+    // 从响应中尝试提取 HTTP 状态码（curl -w 方式）
+    // 如果响应中包含 JSON 且有 "ok": true，则认为成功
+    if (response.find("\"ok\":true") != std::string::npos || 
+        response.find("\"ok\": true") != std::string::npos) {
+        printf("  Upload successful!\n");
+        printf("  Response: %s\n", response.c_str());
+        return true;
+    } else if (response.find("\"stored\"") != std::string::npos) {
+        // 另一种成功标志：包含 stored 字段
+        printf("  Upload successful!\n");
+        printf("  Response: %s\n", response.c_str());
+        return true;
+    } else {
+        printf("  Warning: Upload failed or unexpected response!\n");
+        printf("  Response: %s\n", response.c_str());
+        printf("  Exit code: %d\n", exitCode);
+        return false;
+    }
+}
+
+int ocr_pipline(
+    std::string detModelPath, 
+    std::string recModelPath, 
+    std::string dictPath, 
+    std::string inputImagePath, 
+    bool saveImages,
+    bool saveJson = true,
+    bool uploadJson = false,
+    std::string mcpUrl = "http://127.0.0.1:8743/v1/observations")
+{
+    // 从输入路径生成输出路径：去掉后缀名，添加 _output
+    std::string inputBase = inputImagePath;
+    size_t lastDot = inputBase.find_last_of('.');
+    if (lastDot != std::string::npos) {
+        inputBase = inputBase.substr(0, lastDot);
+    }
+    std::string outputPath = inputBase + "_output";
     
     printf("========================================\n");
     printf("OCR Pipeline Started\n");
@@ -148,8 +319,16 @@ int main(int argc, char** argv)
     printf("Detection Model: %s\n", detModelPath.c_str());
     printf("Recognition Model: %s\n", recModelPath.c_str());
     printf("Dictionary: %s\n", dictPath.c_str());
-    printf("Input: %s\n", inputPath.c_str());
+    printf("Input: %s\n", inputImagePath.c_str());
     printf("Output: %s\n", outputPath.c_str());
+    printf("Save Images: %s\n", saveImages ? "yes" : "no");
+    printf("Save JSON: %s\n", saveJson ? "yes" : "no");
+    printf("Upload JSON: %s", uploadJson ? "yes" : "no");
+    if (uploadJson) {
+        printf(" (%s)\n", mcpUrl.c_str());
+    } else {
+        printf("\n");
+    }
     printf("========================================\n\n");
     
     // 记录初始内存
@@ -175,7 +354,7 @@ int main(int argc, char** argv)
 
     // 步骤 2: 加载图像并转换为 BGR
     printf("Step 2: Loading image and converting to BGR...\n");
-    OCRImage image(inputPath);
+    OCRImage image(inputImagePath);
     
     if (!image.isLoaded()) {
         printf("Error: Failed to load image!\n");
@@ -340,21 +519,12 @@ int main(int argc, char** argv)
     printf("Step 9: Cropping, saving and recognizing text in bounding boxes...\n");
     std::vector<RecognitionResultWithIndex> recognitionResults;
     
-    // 打开文件准备保存识别结果
-    std::string txtPath = outputPath + ".txt";
-    FILE* fp = fopen(txtPath.c_str(), "w");
-    if (!fp) {
-        printf("Error: Cannot create output file: %s\n", txtPath.c_str());
-        return -1;
-    }
-    
-    fprintf(fp, "OCR Recognition Results\n");
-    fprintf(fp, "======================\n\n");
-    
-    // 创建 image 文件夹
+    // 创建 image 文件夹（仅在 --save 时）
     std::string imageFolder = "image";
-    mkdir(imageFolder.c_str(), 0755);
-    printf("  Created image folder: %s\n", imageFolder);
+    if (saveImages) {
+        mkdir(imageFolder.c_str(), 0755);
+        printf("  Created image folder: %s\n", imageFolder);
+    }
     
     for (size_t i = 0; i < boxes.size(); i++) {
         const BoundingBox& box = boxes[i];
@@ -370,18 +540,21 @@ int main(int argc, char** argv)
             continue;
         }
         
-        // 2. 保存图像到文件
-        for (size_t j = 0; j < boxImages.size(); j++) {
-            std::string fileName = std::to_string(i);
-            if (j > 0) {
-                fileName += "_" + std::to_string(j);
+        // 2. 保存图像到文件（仅在 --save 时）
+        if (saveImages) {
+            for (size_t j = 0; j < boxImages.size(); j++) {
+                std::string fileName = std::to_string(i);
+                if (j > 0) {
+                    fileName += "_" + std::to_string(j);
+                }
+                std::string imagePath = imageFolder + "/" + fileName + ".jpg";
+                
+                if (! saveImage(boxImages[j], imagePath)) {
+                    printf("  Warning: Failed to save image %s, skipping...\n", imagePath.c_str());
+                    continue;
+                }
             }
-            std::string imagePath = imageFolder + "/" + fileName + ".jpg";
-            
-            if (! saveImage(boxImages[j], imagePath)) {
-                printf("  Warning: Failed to save image %s, skipping...\n", imagePath.c_str());
-                continue;
-            }
+            printf("  Saved %zu cropped image(s) for box %zu\n", boxImages.size(), i);
         }
         
         // 3. 对裁剪的图像进行识别
@@ -402,13 +575,6 @@ int main(int argc, char** argv)
                 result.box = box;
                 result.result = recResult;
                 recognitionResults.push_back(result);
-                
-                // 保存到文件
-                fprintf(fp, "Box %zu: [%d, %d, %d, %d]\n", 
-                        i, box.x1, box.y1, box.x2, box.y2);
-                fprintf(fp, "  Text: %s\n", recResult.text.c_str());
-                fprintf(fp, "  Confidence: %.4f\n", recResult.confidence);
-                fprintf(fp, "\n");
             }
         } else {
             // 存在小框，识别所有小框并合并
@@ -422,23 +588,16 @@ int main(int argc, char** argv)
                 OCRRecResult recResult = recognizer.recognize(boxImage);
                 
                 if (recResult.success && !recResult.text.empty()) {
-                    printf("      -> Text: \"%s\" (confidence: %.4f)\n", 
-                           recResult.text.c_str(), recResult.confidence);
-                    
-                    RecognitionResultWithIndex result;
-                    result.boxIndex = i;
-                    result.subBoxIndex = j;
-                    result.box = box;
-                    result.result = recResult;
-                    subBoxResults.push_back(result);
-                    
-                    // 保存到文件
-                    fprintf(fp, "Box %zu_%zu: [%d, %d, %d, %d]\n", 
-                            i, j, box.x1, box.y1, box.x2, box.y2);
-                    fprintf(fp, "  Text: %s\n", recResult.text.c_str());
-                    fprintf(fp, "  Confidence: %.4f\n", recResult.confidence);
-                    fprintf(fp, "\n");
-                }
+                        printf("      -> Text: \"%s\" (confidence: %.4f)\n", 
+                               recResult.text.c_str(), recResult.confidence);
+                        
+                        RecognitionResultWithIndex result;
+                        result.boxIndex = i;
+                        result.subBoxIndex = j;
+                        result.box = box;
+                        result.result = recResult;
+                        subBoxResults.push_back(result);
+                    }
             }
             
             // 合并小框结果
@@ -456,65 +615,91 @@ int main(int argc, char** argv)
                 
                 recognitionResults.push_back(mergedResult);
                 printf("  Box %zu final merged text: \"%s\"\n\n", i, mergedText.c_str());
-                
-                // 保存合并后的结果
-                fprintf(fp, "Box %zu (merged): [%d, %d, %d, %d]\n", 
-                        i, box.x1, box.y1, box.x2, box.y2);
-                fprintf(fp, "  Text: %s\n", mergedText.c_str());
-                fprintf(fp, "  Confidence: %.4f\n", mergedResult.result.confidence);
-                fprintf(fp, "\n");
             }
         }
     }
     
-    fclose(fp);
-    printf("\nRecognition results saved to: %s\n", txtPath.c_str());
     printf("Total recognition results: %zu\n", recognitionResults.size());
     recordTime("Step 9 - Crop, Save & Recognize");
     printMemoryUsage("Step 9 - After Recognition");
     printf("\n");
     
-    // // 步骤 10: 智能合并所有识别结果
-    // printf("Step 10: Merging all recognition results...\n");
-    // std::string mergedText = OcrRecNPU::mergeAllTexts(recognitionResults);
+    // 仅在 --save 时
+    if (saveImages) {
+        // 步骤 10: 将热力图可视化（带方框）
+        printf("Step 10: Visualizing merged heatmap with bounding boxes...\n");
+        BGRImage visImage = visualizeMergedHeatmap(bgrImage, mergedHeatmap, 0.5f, boxes);
+        recordTime("Step 10 - Visualize");
+        printMemoryUsage("Step 10 - After Visualization");
+        printf("\n");
     
-    // // 保存合并后的文本到单独的文件
-    // std::string mergedTxtPath = outputPath + "_merged.txt";
-    // FILE* fpMerged = fopen(mergedTxtPath.c_str(), "w");
-    // if (fpMerged) {
-    //     fprintf(fpMerged, "Merged OCR Text\n");
-    //     fprintf(fpMerged, "===============\n\n");
-    //     fprintf(fpMerged, "%s\n", mergedText.c_str());
-    //     fclose(fpMerged);
-    //     printf("Merged text saved to: %s\n", mergedTxtPath.c_str());
-    // }
-    // recordTime("Step 10 - Merge Texts");
-    // printf("\n");
-    
-    // 步骤 11: 将热力图可视化（带方框）
-    printf("Step 11: Visualizing merged heatmap with bounding boxes...\n");
-    BGRImage visImage = visualizeMergedHeatmap(bgrImage, mergedHeatmap, 0.5f, boxes);
-    recordTime("Step 11 - Visualize");
-    printMemoryUsage("Step 11 - After Visualization");
-    printf("\n");
-    
-    // 步骤 12: 保存可视化结果
-    printf("Step 12: Saving visualization result...\n");
-    if (saveImage(visImage, outputPath)) {
-        printf("  Saved: %s\n", outputPath.c_str());
+        // 步骤 11: 保存可视化结果
+        std::string visImagePath = outputPath + "_vis.jpg";
+        printf("Step 11: Saving visualization result...\n");
+        if (saveImage(visImage, visImagePath)) {
+            printf("  Saved: %s\n", visImagePath.c_str());
+        } else {
+            printf("  Warning: Failed to save %s\n", visImagePath.c_str());
+        }
+        recordTime("Step 11 - Save Image");
+        printMemoryUsage("Step 11 - After Save");
+        printf("\n");
     } else {
-        printf("  Warning: Failed to save %s\n", outputPath.c_str());
+        printf("Step 11: Skipping visualization save (use --save to enable)\n");
+        printf("\n");
     }
-    recordTime("Step 12 - Save Image");
-    printMemoryUsage("Step 12 - After Save");
-    printf("\n");
     
-    // 步骤 13: 对象离开作用域，自动释放 NPU 资源和热力图数据
-    printf("Step 13: Destroying objects...\n");
+    // 步骤 12: 对象离开作用域，自动释放 NPU 资源和热力图数据
+    printf("Step 12: Destroying objects...\n");
     // detector, image, heatmaps, mergedHeatmap, boxes 等对象会自动调用析构函数
     printf("All objects destroyed, resources released automatically\n");
-    recordTime("Step 13 - Cleanup");
-    printMemoryUsage("Step 13 - After Cleanup");
+    recordTime("Step 12 - Cleanup");
+    printMemoryUsage("Step 12 - After Cleanup");
+    printf("\n");
+    
+    // 步骤 13: 生成 JSON 结果
+    printf("Step 13: Generating JSON result...\n");
+    std::string jsonContent = formatResultsToJson(inputImagePath, bgrImage.width, bgrImage.height, recognitionResults, boxes);
+    
+    // 根据参数决定是否保存或上传
+    if (saveJson) {
+        // 如果同时需要上传，保存到固定临时文件
+        std::string jsonPath;
+        if (uploadJson) {
+            jsonPath = "/tmp/result.json";
+            printf("  Saving JSON to temp file for upload: %s\n", jsonPath.c_str());
+        } else {
+            jsonPath = outputPath + "_result.json";
+            printf("  Saving JSON to file: %s\n", jsonPath.c_str());
+        }
+        
+        std::ofstream jsonFile(jsonPath);
+        if (jsonFile.is_open()) {
+            jsonFile << jsonContent;
+            jsonFile.close();
+            printf("  Saved JSON result: %s\n", jsonPath.c_str());
+        } else {
+            printf("  Error: Cannot create JSON file: %s\n", jsonPath.c_str());
+        }
+    }
+    
+    // 如果需要上传
+    if (uploadJson) {
+        // 检查是否有识别结果
+        if (recognitionResults.empty()) {
+            printf("  Skipping upload: No text recognized (block_count = 0)\n");
+        } else {
+            printf("  Uploading JSON to MCP service...\n");
+            if (uploadJsonToMcp(jsonContent, mcpUrl)) {
+                printf("  Upload successful!\n");
+            } else {
+                printf("  Warning: Upload failed!\n");
+            }
+        }
+    }
+    
+    recordTime("Step 13 - Generate & Save/Upload JSON");
+    printMemoryUsage("Step 13 - After Save JSON");
     printf("\n");
 
     printf("========================================\n");
@@ -529,30 +714,135 @@ int main(int argc, char** argv)
     printf("\n========================================\n");
     printf("Memory Usage Summary\n");
     printf("========================================\n");
-    printf("Model size: ~0.9 MB\n");
-    printf("Peak memory (VmPeak): %.2f MB\n", 161.11);
     printf("Final memory (VmRSS): %.2f MB\n", finalMemory.vmRSS / 1024.0);
-    printf("\n");
-    printf("Memory breakdown:\n");
-    printf("  - Model weights: ~0.9 MB (%.1f%%)\n", (0.9 / 161.11) * 100);
-    printf("  - AXERA SDK base: ~45 MB (%.1f%%)\n", (45.0 / 161.11) * 100);
-    printf("  - NPU buffers: ~85 MB (%.1f%%)\n", (85.0 / 161.11) * 100);
-    printf("  - Image data: ~10 MB (%.1f%%)\n", (10.0 / 161.11) * 100);
-    printf("  - Program base: ~10 MB (%.1f%%)\n", (10.0 / 161.11) * 100);
-    printf("\n");
-    printf("Optimization status:\n");
-    printf("  - Inference mode: NOT SUPPORTED by this SDK version\n");
-    printf("  - Alternative: Use INT8 quantization or reduce input size\n");
-    printf("\n");
-    printf("Note: High memory usage is due to AXERA SDK pre-allocating\n");
-    printf("      memory pools for NPU inference performance.\n");
-    printf("      This is normal and expected behavior.\n");
+    
+    return 0;
+}
+
+int main(int argc, char** argv)
+{
+    bool saveImages = false;  // 默认不保存小图和可视化结果
+    bool saveJson = true;     // 默认保存 JSON
+    bool uploadJson = false;  // 默认不上传
+    std::string folderPath;   // 文件夹路径
+    std::string mcpUrl = "http://127.0.0.1:8743/v1/observations";  // MCP 服务地址
+    
+    // 默认路径
+    std::string detModelPath = "/root/models/pp_ocr/ch_PP_OCRv3_det_npu.axmodel";
+    std::string recModelPath = "/root/models/pp_ocr/ch_PP_OCRv4_rec_npu.axmodel";
+    std::string dictPath = "/root/models/pp_ocr/ppocr_keys_v1.txt";
+    std::string inputImagePath;
+    
+    // 解析参数：支持 --save, --folder, --det_model, --rec_model, --dict, --image, --upload, --mcp-url 选项
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--save") {
+            saveImages = true;
+        } else if (arg == "--no-save-json") {
+            saveJson = false;
+        } else if (arg == "--upload") {
+            uploadJson = true;
+        } else if (arg == "--folder" && i + 1 < argc) {
+            folderPath = argv[++i];
+        } else if (arg == "--mcp-url" && i + 1 < argc) {
+            mcpUrl = argv[++i];
+        } else if (arg == "--det_model" && i + 1 < argc) {
+            detModelPath = argv[++i];
+        } else if (arg == "--rec_model" && i + 1 < argc) {
+            recModelPath = argv[++i];
+        } else if (arg == "--dict" && i + 1 < argc) {
+            dictPath = argv[++i];
+        } else if (arg == "--image" && i + 1 < argc) {
+            inputImagePath = argv[++i];
+        } else if (arg == "--help" || arg == "-h") {
+            printf("Usage: %s [OPTIONS]\n", argv[0]);
+            printf("Options:\n");
+            printf("  --save          Save cropped images and visualization result\n");
+            printf("  --no-save-json  Do not save JSON to file (default: save)\n");
+            printf("  --upload        Upload JSON to MCP service\n");
+            printf("  --mcp-url URL   MCP service URL (default: http://127.0.0.1:8743/v1/observations)\n");
+            printf("  --folder PATH   Monitor folder for new images (recursive)\n");
+            printf("  --det_model PATH Detection model path (default: /root/models/pp_ocr/ch_PP_OCRv3_det_npu.axmodel)\n");
+            printf("  --rec_model PATH Recognition model path (default: /root/models/pp_ocr/ch_PP_OCRv4_rec_npu.axmodel)\n");
+            printf("  --dict PATH     Dictionary path (default: /root/models/pp_ocr/ppocr_keys_v1.txt)\n");
+            printf("  --image PATH    Input image path (required if --folder not provided)\n");
+            printf("  --help, -h      Show this help message\n");
+            printf("\nExample:\n");
+            printf("%s --image ./test.png\n", argv[0]);
+            printf("%s --save --image ./test.png --det_model /path/to/model.axmodel\n", argv[0]);
+            printf("%s --folder /var/lib/openchronicle/screenshots\n", argv[0]);
+            printf("%s --folder /var/lib/screenshots --upload --mcp-url http://192.168.1.100:8743/v1/observations\n", argv[0]);
+            return 0;
+        }
+    }
+    
+    // 检查参数：必须有 --image 或 --folder
+    if (inputImagePath.empty() && folderPath.empty()) {
+        printf("Error: Either --image or --folder is required!\n");
+        printf("Usage: %s [--save] --image <input_image> [--det_model PATH] [--rec_model PATH] [--dict PATH]\n", argv[0]);
+        printf("   or: %s [--save] --folder <folder_path> [--det_model PATH] [--rec_model PATH] [--dict PATH]\n", argv[0]);
+        printf("Use --help for more information.\n");
+        return -1;
+    }
+    
+    // 如果同时提供了 --image 和 --folder，优先使用 --folder
+    if (!folderPath.empty()) {
+        printf("========================================\n");
+        printf("OCR Folder Monitoring Mode\n");
+        printf("========================================\n");
+        printf("Monitoring folder: %s\n", folderPath.c_str());
+        printf("Press Ctrl+C to stop monitoring\n");
+        printf("========================================\n\n");
+        
+        // 注册信号处理
+        signal(SIGINT, signalHandler);
+        signal(SIGTERM, signalHandler);
+        
+        // 监控循环
+        int processedCount = 0;
+        while (g_running) {
+            // 获取最新的未处理图片
+            std::string latestImage = getLatestUnprocessedImage(folderPath);
+            
+            if (latestImage.empty()) {
+                printf("No unprocessed images found. Waiting 5 seconds...\n");
+                // 等待 5 秒
+                for (int i = 0; i < 5 && g_running; i++) {
+                    usleep(1000000);  // 1 秒
+                }
+                continue;
+            }
+            
+            printf("\n========================================\n");
+            printf("Processing image: %s\n", latestImage.c_str());
+            printf("========================================\n");
+            
+            // 调用 OCR 流程函数（文件夹模式：保存 JSON 到临时文件并上传）
+            int result = ocr_pipline(detModelPath, recModelPath, dictPath, latestImage, saveImages, true, true, mcpUrl);
+            
+            if (result == 0) {
+                // 处理成功，重命名图片
+                markImageAsProcessed(latestImage);
+                processedCount++;
+                printf("Processed %d image(s) so far\n", processedCount);
+            } else {
+                printf("Error: Failed to process image %s\n", latestImage.c_str());
+            }
+            
+            printf("\n");
+        }
+        
+        printf("\nMonitoring stopped. Total processed: %d images\n", processedCount);
+        return 0;
+    }
+    
+    // 单张图片处理模式
+    printf("========================================\n");
+    printf("OCR Single Image Mode\n");
     printf("========================================\n");
     
-    printf("\n========================================\n");
-    printf("OCR Pipeline Completed Successfully!\n");
-    printf("Output saved to: %s\n", outputPath.c_str());
-    printf("========================================\n");
+    // 调用 OCR 流程函数（单图模式：保存 JSON，不上传）
+    ocr_pipline(detModelPath, recModelPath, dictPath, inputImagePath, saveImages, saveJson, uploadJson, mcpUrl);
     
     return 0;
 }

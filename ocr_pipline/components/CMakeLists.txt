@@ -9,3 +9,6 @@ add_subdirectory(ocr_det)
 
 # Add OCR recognition component
 add_subdirectory(ocr_rec)
+
+# Add result writer component
+add_subdirectory(result_writer)
